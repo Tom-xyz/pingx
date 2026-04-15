@@ -516,12 +516,12 @@ def _make_layout() -> Layout:
         Layout(name="bottom", ratio=3),
     )
     root["top"].split_row(
-        Layout(name="logo",   ratio=5),
-        Layout(name="stats",  ratio=4),
+        Layout(name="logo",   ratio=1),
+        Layout(name="stats",  ratio=1),
     )
     root["bottom"].split_row(
-        Layout(name="viz",    ratio=3),
-        Layout(name="events", ratio=2),
+        Layout(name="viz",    ratio=1),
+        Layout(name="events", ratio=1),
     )
     return root
 
