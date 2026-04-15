@@ -299,20 +299,14 @@ def _ping_loop(st: PingState) -> None:
             send_ts = time.monotonic()
             sock.sendto(_build_echo(seq), (st.target_ip, 0))
 
-            with st.lock:
-                st.events.append((send_ts, False))
-                # total_sent is NOT incremented here — wait until outcome is
-                # known so total_sent and total_recv always update atomically.
-                # Incrementing sent before recv caused lost to transiently
-                # read 1 during every successful ping's receive window.
-
             _data, _addr = sock.recvfrom(256)
             rtt = (time.monotonic() - send_ts) * 1000
 
             with st.lock:
-                if st.events:
-                    st.events[-1] = (st.events[-1][0], True)
-                st.total_sent  += 1   # ← both updated atomically on success
+                # Outcome known: success. Append and increment atomically so
+                # _window_loss and total_sent/recv are never out of step.
+                st.events.append((send_ts, True))
+                st.total_sent  += 1
                 st.total_recv  += 1
                 st.current_rtt  = rtt
                 st.rtts.append(rtt)
@@ -333,7 +327,9 @@ def _ping_loop(st: PingState) -> None:
         except (socket.timeout, OSError):
             cfail += 1
             with st.lock:
-                st.total_sent  += 1   # ← outcome known: timed out / error
+                # Outcome known: timeout / error. Record confirmed loss.
+                st.events.append((send_ts, False))
+                st.total_sent  += 1
                 st.ticker.append({'received': False, 'rtt': None})
                 st.current_rtt = None
 

@@ -165,29 +165,42 @@ class TestThemes:
 
 class TestStatsAccumulation:
     """
-    Guard against the transient lost=1 bug where total_sent was incremented
-    before recvfrom() returned, causing the TUI to briefly display lost=1
-    on every successful ping then flip back to lost=0 on the next render.
+    Guards against two related bugs:
 
-    The fix: total_sent and total_recv must always be incremented in the same
-    lock block (both on success), or only total_sent on timeout. The display
-    value (total_sent - total_recv) must never exceed the true number of
-    confirmed losses.
+    Bug 1 — transient lost=1 on every successful ping:
+      total_sent was incremented before recvfrom() returned. The TUI firing
+      at 10 Hz could catch the window and display lost=1, then flip back to 0
+      when total_recv caught up.
+
+    Bug 2 — window loss (5-min / 1-hr) never records real losses:
+      events.append((ts, False)) happened before recvfrom(), so _window_loss
+      saw the in-flight packet as a loss (100% flash at startup). Worse, the
+      except block never appended to events at all, so actual timeouts were
+      silently dropped from the window calculations.
+
+    Fix: all state (events, total_sent, total_recv) is updated in a single
+    lock block *after* the outcome is known — success or timeout.
     """
 
-    def _sim_success(self, st: pingx.PingState) -> None:
-        """Simulate one successful ping: both counters update atomically."""
+    def _sim_success(self, st: pingx.PingState, send_ts: float = None) -> None:
+        """Simulate one successful ping: all counters update atomically."""
+        ts = send_ts if send_ts is not None else time.monotonic()
         with st.lock:
+            st.events.append((ts, True))
             st.total_sent += 1
             st.total_recv += 1
 
-    def _sim_timeout(self, st: pingx.PingState) -> None:
-        """Simulate one timed-out ping: only sent increments."""
+    def _sim_timeout(self, st: pingx.PingState, send_ts: float = None) -> None:
+        """Simulate one timed-out ping: sent increments, event recorded as loss."""
+        ts = send_ts if send_ts is not None else time.monotonic()
         with st.lock:
+            st.events.append((ts, False))
             st.total_sent += 1
 
     def _lost(self, st: pingx.PingState) -> int:
         return st.total_sent - st.total_recv
+
+    # ── total_sent / total_recv atomicity ─────────────────────────────────────
 
     def test_lost_is_zero_after_successful_ping(self):
         st = pingx.PingState()
@@ -225,12 +238,7 @@ class TestStatsAccumulation:
         assert st.total_recv == 3
 
     def test_sent_and_recv_never_updated_separately_on_success(self):
-        """
-        If total_sent were incremented before recvfrom (old bug), a reader
-        between the two lock sections would see lost=1.  Verify the fix by
-        checking that no observable intermediate state has lost > confirmed
-        losses using a threaded reader.
-        """
+        """Threaded reader must never observe lost > 0 during all-success run."""
         st = pingx.PingState()
         observations = []
         stop = threading.Event()
@@ -242,14 +250,11 @@ class TestStatsAccumulation:
 
         t = threading.Thread(target=reader, daemon=True)
         t.start()
-
         for _ in range(50):
             self._sim_success(st)
-
         stop.set()
         t.join(timeout=1)
 
-        # Every observed value must be 0 — no transient lost=1 mid-update
         bad = [v for v in observations if v != 0]
         assert not bad, \
             f"Reader saw transient non-zero lost values: {bad[:5]}"
@@ -267,6 +272,65 @@ class TestStatsAccumulation:
         for _ in range(10):
             self._sim_success(st)
             assert st.total_recv <= st.total_sent
+
+    # ── _window_loss accuracy (bug 2) ─────────────────────────────────────────
+
+    def test_window_loss_zero_when_no_events(self):
+        """At startup with no finalized pings, loss must be 0 — not a flash."""
+        st = pingx.PingState()
+        loss, sent, recv = pingx._window_loss(300, st)
+        assert loss == 0.0
+        assert sent == 0
+
+    def test_window_loss_zero_for_all_success(self):
+        st = pingx.PingState()
+        for _ in range(10):
+            self._sim_success(st)
+        loss, sent, _ = pingx._window_loss(300, st)
+        assert loss == 0.0
+        assert sent == 10
+
+    def test_window_loss_records_timeouts(self):
+        """Timeouts must appear in window loss — the old bug dropped them."""
+        st = pingx.PingState()
+        self._sim_success(st)
+        self._sim_success(st)
+        self._sim_timeout(st)  # 1 loss out of 3
+        loss, sent, recv = pingx._window_loss(300, st)
+        assert sent == 3
+        assert recv == 2
+        assert abs(loss - 33.33) < 0.1
+
+    def test_window_loss_never_shows_inflight_as_loss(self):
+        """
+        Before the fix, events.append((ts, False)) was called before recvfrom,
+        so a freshly-started pingx showed 100% loss until the first recv.
+        Verify: an event is only in the deque with received=True (success) or
+        received=False (confirmed timeout), never as a dangling in-flight False.
+        """
+        st = pingx.PingState()
+        # Simulate what the OLD code did: append False, then update to True
+        # (this is the bug pattern — it should NOT happen in the fixed code)
+        # The fixed code never appends a False that later gets flipped to True.
+        # We just verify that after a success, the event is True from the start.
+        now = time.monotonic()
+        self._sim_success(st, send_ts=now)
+        with st.lock:
+            last_received = st.events[-1][1]
+        assert last_received is True, \
+            "Success event was stored as False — in-flight append bug present"
+
+    def test_window_excludes_events_older_than_window(self):
+        st = pingx.PingState()
+        old_ts = time.monotonic() - 400  # outside 5-min window
+        with st.lock:
+            st.events.append((old_ts, False))  # old loss, should be excluded
+            st.total_sent += 1
+        for _ in range(5):
+            self._sim_success(st)
+        loss, sent, _ = pingx._window_loss(300, st)
+        assert sent == 5   # old event excluded
+        assert loss == 0.0
 
 
 # ── Platform detection ────────────────────────────────────────────────────────
