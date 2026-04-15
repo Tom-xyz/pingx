@@ -443,7 +443,7 @@ def build_visualizer(panel_w: int, panel_h: int) -> Panel:
         t.append(f"  {char}", style=Style(color=color))
         t.append(f" {label}", style=Style(dim=True))
 
-    return _panel(t, "[bold] PING HISTORY [/]", down)
+    return _panel(t, "[bold] LATENCY HISTORY [/]", down)
 
 
 def build_events() -> Panel:
