@@ -315,93 +315,155 @@ def build_visualizer(panel_w: int, panel_h: int) -> Panel:
         ticker = list(_ticker)
         down   = _net_down
 
-    # Inner grid dimensions (subtract panel border + padding + legend rows)
-    cols    = max(4, panel_w - 4)
-    rows    = max(2, panel_h - 6)   # reserve 2 rows for legend
-    cap     = cols * rows
+    # Chart dimensions
+    # Each braille char = 2 data columns wide, 4 pixel rows tall
+    # Reserve: 2 border + 2 padding + y-axis (built dynamically) + 3 legend rows
+    chart_rows = max(3, panel_h - 6)
+    chart_cols = max(4, panel_w - 12)
+    n_steps    = chart_cols * 2        # each braille col = 2 pings
+    total_h    = chart_rows * 4        # pixel height
 
-    recent  = ticker[-cap:] if len(ticker) > cap else ticker
-    padding = cap - len(recent)
+    # Extract RTT series — None means timeout or no data yet
+    rtt_raw = [e['rtt'] if e else None for e in ticker]
+    recent  = rtt_raw[-n_steps:] if len(rtt_raw) > n_steps else rtt_raw
+    data    = [None] * (n_steps - len(recent)) + recent
 
-    empty_s   = Style(color="grey11")
-    timeout_s = Style(color="grey30")
+    # Auto-scale: fit the observed range with a small breathing margin
+    valid = [v for v in data if v is not None]
+    if len(valid) >= 2:
+        rtt_lo = min(valid)
+        rtt_hi = max(valid)
+        pad    = max(1.0, (rtt_hi - rtt_lo) * 0.12)
+        rtt_lo = max(0.0, rtt_lo - pad)
+        rtt_hi = rtt_hi + pad
+    elif valid:
+        rtt_lo = max(0.0, valid[0] - 5.0)
+        rtt_hi = valid[0] + 5.0
+    else:
+        rtt_lo, rtt_hi = 0.0, 100.0
 
-    t    = Text()
-    flat = [None] * padding + recent
-    last = len(flat) - 1   # index of the cursor (newest ping)
+    if rtt_hi - rtt_lo < 1.0:
+        rtt_hi = rtt_lo + 1.0
 
-    # Fade bands: entries this many steps from the cursor get progressively dimmed.
-    # Steps are in units of individual pings (0.2s each).
-    # bright = 0-4s, mid = 4-20s, faded = 20-60s, very faded = >60s
-    BRIGHT_STEPS = 20    # ~4s
-    MID_STEPS    = 100   # ~20s
-    FADE_STEPS   = 300   # ~60s
+    def to_px(rtt: float) -> int:
+        """RTT → pixel bar height from bottom (1..total_h)."""
+        norm = (rtt - rtt_lo) / (rtt_hi - rtt_lo)
+        return max(1, min(total_h, round(norm * (total_h - 1)) + 1))
 
-    for i, entry in enumerate(flat):
-        if i and i % cols == 0:
-            t.append("\n")
+    px_heights = [to_px(v) if v is not None else 0 for v in data]
 
-        age = last - i  # 0 = cursor (newest), grows toward oldest
+    # Y-axis label width (widest of top/mid/bottom labels)
+    ylw = max(len(f"{rtt_hi:.0f}"), len(f"{rtt_lo:.0f}"), 3) + 2  # "+ ms"
 
-        # ── Cursor character (newest ping) ────────────────────────────────
-        if i == last and entry is not None:
-            base   = _rtt_style(entry['rtt'] if entry['received'] else None)
-            color  = base.color.name if base.color else "white"
-            if not entry['received']:
-                color = "red"
-            t.append("▮", style=Style(color=color, bold=True))
-            continue
+    t = Text()
 
-        # ── Fade multiplier based on age ─────────────────────────────────
-        if   age <= BRIGHT_STEPS: dim = False;  opacity = "normal"
-        elif age <= MID_STEPS:    dim = False;  opacity = "mid"
-        elif age <= FADE_STEPS:   dim = True;   opacity = "faded"
-        else:                     dim = True;   opacity = "veryfaded"
+    for row_idx in range(chart_rows):
+        row_px_top = row_idx * 4  # topmost absolute pixel row for this braille row
 
-        # Per-opacity colour overrides for timeout/empty
-        def _faded_empty():
-            if   opacity == "veryfaded": return Style(color="grey3")
-            elif opacity == "faded":     return Style(color="grey7")
-            else:                        return Style(color="grey11")
-
-        def _faded_timeout():
-            if   opacity == "veryfaded": return Style(color="grey11")
-            elif opacity == "faded":     return Style(color="grey19")
-            else:                        return Style(color="grey30")
-
-        if entry is None:
-            t.append("·", style=_faded_empty())
-        elif not entry['received']:
-            t.append("░", style=_faded_timeout())
+        # ── Y-axis ────────────────────────────────────────────────────────
+        mid_row = chart_rows // 2
+        if row_idx == 0:
+            t.append(f"{rtt_hi:.0f}ms".rjust(ylw), style=Style(dim=True))
+            t.append(" ┤", style=Style(color="grey42", dim=True))
+        elif row_idx == mid_row:
+            mid_rtt = (rtt_hi + rtt_lo) / 2
+            t.append(f"{mid_rtt:.0f}ms".rjust(ylw), style=Style(dim=True))
+            t.append(" ┼", style=Style(color="grey42", dim=True))
+        elif row_idx == chart_rows - 1:
+            t.append(f"{rtt_lo:.0f}ms".rjust(ylw), style=Style(dim=True))
+            t.append(" ┤", style=Style(color="grey42", dim=True))
         else:
-            base  = _rtt_style(entry['rtt'])
-            color = base.color.name if base.color else "white"
-            if opacity in ("faded", "veryfaded"):
-                # Desaturate: map colours to their dimmed variants
-                color = {
+            t.append(" " * ylw + "  ", style=Style(dim=True))
+
+        # ── Braille columns ───────────────────────────────────────────────
+        for col_idx in range(chart_cols):
+            li = col_idx * 2        # left ping index in data[]
+            ri = col_idx * 2 + 1   # right ping index (more recent of the pair)
+
+            lh        = px_heights[li]
+            rh        = px_heights[ri]
+            l_timeout = data[li] is None
+            r_timeout = data[ri] is None
+            is_last   = (col_idx == chart_cols - 1)
+
+            # Build braille character from filled-from-bottom bars
+            # Braille bit layout:
+            #   left col:  bit0=row0, bit1=row1, bit2=row2, bit6=row3
+            #   right col: bit3=row0, bit4=row1, bit5=row2, bit7=row3
+            char_val = 0
+            for bit, bp in ((0, 0), (1, 1), (2, 2), (6, 3)):
+                p = row_px_top + bp
+                if not l_timeout and lh > 0 and p >= (total_h - lh):
+                    char_val |= (1 << bit)
+            for bit, bp in ((3, 0), (4, 1), (5, 2), (7, 3)):
+                p = row_px_top + bp
+                if not r_timeout and rh > 0 and p >= (total_h - rh):
+                    char_val |= (1 << bit)
+
+            ch = chr(0x2800 + char_val)
+
+            # Colour from the more-recent (right) RTT of the pair
+            rtt_val = data[ri] if not r_timeout else (data[li] if not l_timeout else None)
+            base    = _rtt_style(rtt_val)
+            color   = base.color.name if base.color else "bright_green"
+
+            # Timeout marker: ⣀ = bottom 2 dots, dim red — visible but unobtrusive
+            if l_timeout and r_timeout:
+                ch    = "⣀"
+                color = "red"
+
+            # ── Age fade: smooth gradient left → right ────────────────────
+            # age 0 = rightmost (current), increases toward left
+            age      = n_steps - 1 - ri
+            age_frac = age / max(n_steps - 1, 1)   # 0.0 (newest) → 1.0 (oldest)
+
+            if is_last:
+                # Cursor: bold + bright regardless of RTT color
+                style = Style(color=color, bold=True)
+            elif age_frac < 0.25:
+                # Recent quarter — full color
+                style = Style(color=color)
+            elif age_frac < 0.55:
+                # Middle history — slightly muted
+                desaturated = {
+                    "bright_green": "green",
+                    "yellow":       "dark_goldenrod",
+                    "orange1":      "dark_orange",
+                }.get(color, color)
+                style = Style(color=desaturated)
+            else:
+                # Old history — dim and desaturated
+                desaturated = {
                     "bright_green": "dark_green",
                     "green":        "dark_green",
-                    "yellow":       "dark_orange",
+                    "yellow":       "dark_goldenrod",
+                    "dark_goldenrod": "dark_goldenrod",
                     "orange1":      "dark_red",
+                    "dark_orange":  "dark_red",
                     "red":          "dark_red",
                 }.get(color, color)
-            char = "▒" if opacity in ("faded", "veryfaded") else "█"
-            t.append(char, style=Style(color=color, dim=dim))
+                style = Style(color=desaturated, dim=True)
+
+            t.append(ch, style=style)
+
+        t.append("\n")
+
+    # Bottom axis — time arrow
+    axis = " " * (ylw + 2) + "└" + "─" * max(1, chart_cols - 6) + " now →"
+    t.append(axis + "\n", style=Style(color="grey42", dim=True))
 
     # Legend
-    t.append("\n\n")
-    legend_items = [
-        ("▮", "bright_green", "now"),
-        ("█", "bright_green", "<20ms"),
-        ("█", "green",        "<50ms"),
-        ("█", "yellow",       "<100ms"),
-        ("█", "orange1",      "<200ms"),
-        ("█", "red",          ">200ms"),
-        ("░", "grey30",       "timeout"),
-    ]
-    for char, color, label in legend_items:
-        t.append(f" {char}", style=Style(color=color, bold=(char == "▮")))
-        t.append(f" {label} ", style=Style(dim=True))
+    t.append("\n")
+    for char, color, label in (
+        ("⣿", "bright_green", "< 20ms "),
+        ("⣿", "green",        "< 50ms "),
+        ("⣿", "yellow",       "< 100ms"),
+        ("⣿", "orange1",      "< 200ms"),
+        ("⣿", "red",          "> 200ms"),
+        ("⣀", "red",          "timeout"),
+    ):
+        t.append(f"  {char}", style=Style(color=color))
+        t.append(f" {label}", style=Style(dim=True))
 
     return _panel(t, "[bold] PING HISTORY [/]", down)
 
