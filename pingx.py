@@ -312,8 +312,9 @@ def build_stats() -> Panel:
 
 def build_visualizer(panel_w: int, panel_h: int) -> Panel:
     with _lock:
-        ticker = list(_ticker)
-        down   = _net_down
+        ticker     = list(_ticker)
+        down       = _net_down
+        real_count = len(ticker)   # how many real pings we have so far
 
     # Chart dimensions
     # Each braille char = 2 data columns wide, 4 pixel rows tall
@@ -322,6 +323,10 @@ def build_visualizer(panel_w: int, panel_h: int) -> Panel:
     chart_cols = max(4, panel_w - 12)
     n_steps    = chart_cols * 2        # each braille col = 2 pings
     total_h    = chart_rows * 4        # pixel height
+
+    # How many leading entries in `data` are padding (no pings yet).
+    # Once the chart is full this is 0 — no dimming at all.
+    pad_count = max(0, n_steps - real_count)
 
     # Extract RTT series — None means timeout or no data yet
     rtt_raw = [e['rtt'] if e else None for e in ticker]
@@ -412,12 +417,13 @@ def build_visualizer(panel_w: int, panel_h: int) -> Panel:
                 ch    = "⣀"
                 color = "red"
 
-            # ── Fade: dim only the 3 leftmost columns, full colour everywhere else ──
-            # Using absolute col_idx (not age fraction) prevents characters from
-            # toggling dim/normal as the chart scrolls, which caused flashing.
+            # ── Fade: dim only true padding (chart still filling up) ─────────
+            # Once the chart is full, pad_count=0 and nothing is ever dimmed.
+            # This eliminates flashing — the dim zone only shrinks as history
+            # accumulates; it never shifts after the chart fills.
             if is_last:
                 style = Style(color=color, bold=True)
-            elif col_idx < 3:
+            elif li < pad_count:
                 style = Style(color=color, dim=True)
             else:
                 style = Style(color=color)
