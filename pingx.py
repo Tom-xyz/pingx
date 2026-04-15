@@ -323,9 +323,8 @@ def build_stats() -> Panel:
 
 def build_visualizer(panel_w: int, panel_h: int) -> Panel:
     with _lock:
-        ticker     = list(_ticker)
-        down       = _net_down
-        real_count = len(ticker)   # how many real pings we have so far
+        ticker = list(_ticker)
+        down   = _net_down
 
     # Chart dimensions
     # Each braille char = 2 data columns wide, 4 pixel rows tall
@@ -335,14 +334,15 @@ def build_visualizer(panel_w: int, panel_h: int) -> Panel:
     n_steps    = chart_cols * 2        # each braille col = 2 pings
     total_h    = chart_rows * 4        # pixel height
 
-    # How many leading entries in `data` are padding (no pings yet).
-    # Once the chart is full this is 0 — no dimming at all.
-    pad_count = max(0, n_steps - real_count)
+    # Align ticker entries to the data window.
+    # actual[i] is a ticker dict (received/rtt) or None if no ping yet (padding).
+    # Using ticker entries directly — not a separately-computed pad_count —
+    # so the padding boundary can't drift independently of the data.
+    recent_entries = ticker[-n_steps:] if len(ticker) >= n_steps else ticker
+    actual = [None] * (n_steps - len(recent_entries)) + list(recent_entries)
 
-    # Extract RTT series — None means timeout or no data yet
-    rtt_raw = [e['rtt'] if e else None for e in ticker]
-    recent  = rtt_raw[-n_steps:] if len(rtt_raw) > n_steps else rtt_raw
-    data    = [None] * (n_steps - len(recent)) + recent
+    # RTT series for auto-scaling (None for missing/timeout)
+    data = [e['rtt'] if e and e['received'] else None for e in actual]
 
     # Auto-scale: fit the observed range with a small breathing margin
     valid = [v for v in data if v is not None]
@@ -393,21 +393,26 @@ def build_visualizer(panel_w: int, panel_h: int) -> Panel:
 
         # ── Braille columns ───────────────────────────────────────────────
         for col_idx in range(chart_cols):
-            li = col_idx * 2        # left ping index in data[]
+            li = col_idx * 2        # left ping index
             ri = col_idx * 2 + 1   # right ping index (more recent of the pair)
 
-            is_last    = (col_idx == chart_cols - 1)
-            is_padding = (li < pad_count)
+            is_last  = (col_idx == chart_cols - 1)
+            l_entry  = actual[li]   # ticker dict or None (padding)
+            r_entry  = actual[ri]
 
-            # Padding: chart not yet full — render as invisible empty braille
-            if is_padding:
-                t.append("⠀", style=Style(dim=True))
+            l_has_data = l_entry is not None
+            r_has_data = r_entry is not None
+
+            # True padding (no pings yet): both slots empty → natural ⠀, dim red dot
+            if not l_has_data and not r_has_data:
+                t.append("⣀", style=Style(color="red", dim=True))
                 continue
 
-            lh        = px_heights[li]
-            rh        = px_heights[ri]
-            l_timeout = data[li] is None
-            r_timeout = data[ri] is None
+            l_timeout = l_has_data and not l_entry['received']
+            r_timeout = r_has_data and not r_entry['received']
+
+            lh = px_heights[li]
+            rh = px_heights[ri]
 
             # Build braille character from filled-from-bottom bars
             # Braille bit layout:
@@ -423,16 +428,8 @@ def build_visualizer(panel_w: int, panel_h: int) -> Panel:
                 if not r_timeout and rh > 0 and p >= (total_h - rh):
                     char_val |= (1 << bit)
 
-            ch = chr(0x2800 + char_val)
-
-            # Wide health-band colour — doesn't flip on normal RTT variation
-            rtt_val = data[ri] if not r_timeout else (data[li] if not l_timeout else None)
-            color   = _sparkline_color(rtt_val)
-
-            # Timeout marker: ⣀ = bottom 2 dots, dim red
-            if l_timeout and r_timeout:
-                ch    = "⣀"
-                color = "red"
+            ch    = chr(0x2800 + char_val)
+            color = _sparkline_color(data[ri] if not r_timeout else data[li])
 
             style = Style(color=color, bold=True) if is_last else Style(color=color)
             t.append(ch, style=style)
