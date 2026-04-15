@@ -31,12 +31,23 @@ REFRESH_HZ      = 10    # TUI redraws/sec
 
 # ── RTT colour thresholds (ms) ────────────────────────────────────────────────
 def _rtt_style(rtt):
+    """Fine-grained style used in stats panel text."""
     if rtt is None:  return Style(color="grey23")
     if rtt <  20:    return Style(color="bright_green", bold=True)
     if rtt <  50:    return Style(color="green")
     if rtt < 100:    return Style(color="yellow")
     if rtt < 200:    return Style(color="orange1")
     return              Style(color="red", bold=True)
+
+def _sparkline_color(rtt) -> str:
+    """Wide health-band colours for the sparkline.
+    Y-axis already shows exact RTT — colour here is health signal only,
+    with wide bands so normal variation (~8-30ms) never flips colour."""
+    if rtt is None:  return "grey23"
+    if rtt <  80:    return "bright_green"
+    if rtt < 150:    return "yellow"
+    if rtt < 300:    return "orange1"
+    return               "red"
 
 def _rtt_markup(val, suffix=" ms"):
     if val is None: return "[dim]—[/]"
@@ -385,11 +396,18 @@ def build_visualizer(panel_w: int, panel_h: int) -> Panel:
             li = col_idx * 2        # left ping index in data[]
             ri = col_idx * 2 + 1   # right ping index (more recent of the pair)
 
+            is_last    = (col_idx == chart_cols - 1)
+            is_padding = (li < pad_count)
+
+            # Padding: chart not yet full — render as invisible empty braille
+            if is_padding:
+                t.append("⠀", style=Style(dim=True))
+                continue
+
             lh        = px_heights[li]
             rh        = px_heights[ri]
             l_timeout = data[li] is None
             r_timeout = data[ri] is None
-            is_last   = (col_idx == chart_cols - 1)
 
             # Build braille character from filled-from-bottom bars
             # Braille bit layout:
@@ -407,27 +425,16 @@ def build_visualizer(panel_w: int, panel_h: int) -> Panel:
 
             ch = chr(0x2800 + char_val)
 
-            # Colour from the more-recent (right) RTT of the pair
+            # Wide health-band colour — doesn't flip on normal RTT variation
             rtt_val = data[ri] if not r_timeout else (data[li] if not l_timeout else None)
-            base    = _rtt_style(rtt_val)
-            color   = base.color.name if base.color else "bright_green"
+            color   = _sparkline_color(rtt_val)
 
-            # Timeout marker: ⣀ = bottom 2 dots, dim red — visible but unobtrusive
+            # Timeout marker: ⣀ = bottom 2 dots, dim red
             if l_timeout and r_timeout:
                 ch    = "⣀"
                 color = "red"
 
-            # ── Fade: dim only true padding (chart still filling up) ─────────
-            # Once the chart is full, pad_count=0 and nothing is ever dimmed.
-            # This eliminates flashing — the dim zone only shrinks as history
-            # accumulates; it never shifts after the chart fills.
-            if is_last:
-                style = Style(color=color, bold=True)
-            elif li < pad_count:
-                style = Style(color=color, dim=True)
-            else:
-                style = Style(color=color)
-
+            style = Style(color=color, bold=True) if is_last else Style(color=color)
             t.append(ch, style=style)
 
         t.append("\n")
@@ -439,11 +446,10 @@ def build_visualizer(panel_w: int, panel_h: int) -> Panel:
     # Legend
     t.append("\n")
     for char, color, label in (
-        ("⣿", "bright_green", "< 20ms "),
-        ("⣿", "green",        "< 50ms "),
-        ("⣿", "yellow",       "< 100ms"),
-        ("⣿", "orange1",      "< 200ms"),
-        ("⣿", "red",          "> 200ms"),
+        ("⣿", "bright_green", "< 80ms "),
+        ("⣿", "yellow",       "< 150ms"),
+        ("⣿", "orange1",      "< 300ms"),
+        ("⣿", "red",          "> 300ms"),
         ("⣀", "red",          "timeout"),
     ):
         t.append(f"  {char}", style=Style(color=color))
