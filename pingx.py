@@ -326,22 +326,72 @@ def build_visualizer(panel_w: int, panel_h: int) -> Panel:
     empty_s   = Style(color="grey11")
     timeout_s = Style(color="grey30")
 
-    t = Text()
+    t    = Text()
     flat = [None] * padding + recent
+    last = len(flat) - 1   # index of the cursor (newest ping)
+
+    # Fade bands: entries this many steps from the cursor get progressively dimmed.
+    # Steps are in units of individual pings (0.2s each).
+    # bright = 0-4s, mid = 4-20s, faded = 20-60s, very faded = >60s
+    BRIGHT_STEPS = 20    # ~4s
+    MID_STEPS    = 100   # ~20s
+    FADE_STEPS   = 300   # ~60s
 
     for i, entry in enumerate(flat):
         if i and i % cols == 0:
             t.append("\n")
+
+        age = last - i  # 0 = cursor (newest), grows toward oldest
+
+        # ── Cursor character (newest ping) ────────────────────────────────
+        if i == last and entry is not None:
+            base   = _rtt_style(entry['rtt'] if entry['received'] else None)
+            color  = base.color.name if base.color else "white"
+            if not entry['received']:
+                color = "red"
+            t.append("▮", style=Style(color=color, bold=True))
+            continue
+
+        # ── Fade multiplier based on age ─────────────────────────────────
+        if   age <= BRIGHT_STEPS: dim = False;  opacity = "normal"
+        elif age <= MID_STEPS:    dim = False;  opacity = "mid"
+        elif age <= FADE_STEPS:   dim = True;   opacity = "faded"
+        else:                     dim = True;   opacity = "veryfaded"
+
+        # Per-opacity colour overrides for timeout/empty
+        def _faded_empty():
+            if   opacity == "veryfaded": return Style(color="grey3")
+            elif opacity == "faded":     return Style(color="grey7")
+            else:                        return Style(color="grey11")
+
+        def _faded_timeout():
+            if   opacity == "veryfaded": return Style(color="grey11")
+            elif opacity == "faded":     return Style(color="grey19")
+            else:                        return Style(color="grey30")
+
         if entry is None:
-            t.append("·", style=empty_s)
+            t.append("·", style=_faded_empty())
         elif not entry['received']:
-            t.append("░", style=timeout_s)
+            t.append("░", style=_faded_timeout())
         else:
-            t.append("█", style=_rtt_style(entry['rtt']))
+            base  = _rtt_style(entry['rtt'])
+            color = base.color.name if base.color else "white"
+            if opacity in ("faded", "veryfaded"):
+                # Desaturate: map colours to their dimmed variants
+                color = {
+                    "bright_green": "dark_green",
+                    "green":        "dark_green",
+                    "yellow":       "dark_orange",
+                    "orange1":      "dark_red",
+                    "red":          "dark_red",
+                }.get(color, color)
+            char = "▒" if opacity in ("faded", "veryfaded") else "█"
+            t.append(char, style=Style(color=color, dim=dim))
 
     # Legend
     t.append("\n\n")
     legend_items = [
+        ("▮", "bright_green", "now"),
         ("█", "bright_green", "<20ms"),
         ("█", "green",        "<50ms"),
         ("█", "yellow",       "<100ms"),
@@ -350,7 +400,7 @@ def build_visualizer(panel_w: int, panel_h: int) -> Panel:
         ("░", "grey30",       "timeout"),
     ]
     for char, color, label in legend_items:
-        t.append(f" {char}", style=Style(color=color))
+        t.append(f" {char}", style=Style(color=color, bold=(char == "▮")))
         t.append(f" {label} ", style=Style(dim=True))
 
     return _panel(t, "[bold] PING HISTORY [/]", down)
