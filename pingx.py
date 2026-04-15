@@ -412,37 +412,16 @@ def build_visualizer(panel_w: int, panel_h: int) -> Panel:
                 ch    = "⣀"
                 color = "red"
 
-            # ── Age fade: smooth gradient left → right ────────────────────
-            # age 0 = rightmost (current), increases toward left
+            # ── Age fade: dim leftmost ~20% only, full colour everywhere else ──
             age      = n_steps - 1 - ri
             age_frac = age / max(n_steps - 1, 1)   # 0.0 (newest) → 1.0 (oldest)
 
             if is_last:
-                # Cursor: bold + bright regardless of RTT color
                 style = Style(color=color, bold=True)
-            elif age_frac < 0.25:
-                # Recent quarter — full color
-                style = Style(color=color)
-            elif age_frac < 0.55:
-                # Middle history — slightly muted
-                desaturated = {
-                    "bright_green": "green",
-                    "yellow":       "dark_goldenrod",
-                    "orange1":      "dark_orange",
-                }.get(color, color)
-                style = Style(color=desaturated)
+            elif age_frac > 0.80:
+                style = Style(color=color, dim=True)
             else:
-                # Old history — dim and desaturated
-                desaturated = {
-                    "bright_green": "dark_green",
-                    "green":        "dark_green",
-                    "yellow":       "dark_goldenrod",
-                    "dark_goldenrod": "dark_goldenrod",
-                    "orange1":      "dark_red",
-                    "dark_orange":  "dark_red",
-                    "red":          "dark_red",
-                }.get(color, color)
-                style = Style(color=desaturated, dim=True)
+                style = Style(color=color)
 
             t.append(ch, style=style)
 
