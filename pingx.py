@@ -412,13 +412,12 @@ def build_visualizer(panel_w: int, panel_h: int) -> Panel:
                 ch    = "⣀"
                 color = "red"
 
-            # ── Age fade: dim leftmost ~20% only, full colour everywhere else ──
-            age      = n_steps - 1 - ri
-            age_frac = age / max(n_steps - 1, 1)   # 0.0 (newest) → 1.0 (oldest)
-
+            # ── Fade: dim only the 3 leftmost columns, full colour everywhere else ──
+            # Using absolute col_idx (not age fraction) prevents characters from
+            # toggling dim/normal as the chart scrolls, which caused flashing.
             if is_last:
                 style = Style(color=color, bold=True)
-            elif age_frac > 0.80:
+            elif col_idx < 3:
                 style = Style(color=color, dim=True)
             else:
                 style = Style(color=color)
