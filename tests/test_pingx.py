@@ -161,6 +161,75 @@ class TestThemes:
             assert isinstance(theme.accent, str)
 
 
+# ── _parse_reply validation ───────────────────────────────────────────────────
+
+class TestParseReply:
+    """
+    Guards against stale / foreign ICMP packets producing impossibly low RTTs.
+
+    Without reply validation, recvfrom() would accept any ICMP packet —
+    including delayed replies from previous timed-out pings arriving in the
+    next ping's receive window.  The embedded send timestamp would not match
+    the current send_ts, yielding RTTs of ~0.2ms for a cross-internet host.
+
+    _parse_reply must:
+      - Accept only type=0 (echo reply) packets
+      - Reject packets with the wrong ident (other processes)
+      - Reject packets with the wrong seq (previous/stale pings)
+      - Return the embedded monotonic send timestamp on a valid match
+    """
+
+    def _make_reply(self, ident: int, seq: int, send_ts: float,
+                    icmp_type: int = 0) -> bytes:
+        """Build a minimal ICMP echo reply carrying an embedded timestamp."""
+        payload = struct.pack('!d', send_ts)
+        hdr = struct.pack('!BBHHH', icmp_type, 0, 0, ident, seq & 0xffff)
+        return hdr + payload
+
+    def test_valid_reply_returns_timestamp(self):
+        ts   = time.monotonic() - 0.010   # 10ms ago
+        data = self._make_reply(ident=1234, seq=7, send_ts=ts)
+        result = pingx._parse_reply(data, ident=1234, seq=7)
+        assert result is not None
+        assert abs(result - ts) < 1e-9
+
+    def test_wrong_ident_returns_none(self):
+        ts   = time.monotonic()
+        data = self._make_reply(ident=9999, seq=7, send_ts=ts)
+        assert pingx._parse_reply(data, ident=1234, seq=7) is None
+
+    def test_wrong_seq_returns_none(self):
+        ts   = time.monotonic()
+        data = self._make_reply(ident=1234, seq=6, send_ts=ts)   # seq=6, expected 7
+        assert pingx._parse_reply(data, ident=1234, seq=7) is None
+
+    def test_wrong_icmp_type_returns_none(self):
+        """type=8 is an echo request — should be rejected."""
+        ts   = time.monotonic()
+        data = self._make_reply(ident=1234, seq=7, send_ts=ts, icmp_type=8)
+        assert pingx._parse_reply(data, ident=1234, seq=7) is None
+
+    def test_too_short_returns_none(self):
+        assert pingx._parse_reply(b'\x00' * 15, ident=1234, seq=7) is None
+        assert pingx._parse_reply(b'',           ident=1234, seq=7) is None
+
+    def test_stale_reply_carries_old_timestamp(self):
+        """
+        A delayed reply from seq=N-1 must be rejected when we're waiting for
+        seq=N.  Simulates the scenario that caused min RTT to read ~0.2ms:
+        the old reply arrives quickly but has the wrong seq, so it's discarded.
+        """
+        old_ts = time.monotonic() - 2.0   # arrived 2s late
+        stale  = self._make_reply(ident=1234, seq=6, send_ts=old_ts)
+        assert pingx._parse_reply(stale, ident=1234, seq=7) is None
+
+    def test_seq_wraps_at_16_bits(self):
+        """seq is sent as seq & 0xffff — validate wrap-around matching."""
+        ts   = time.monotonic()
+        data = self._make_reply(ident=1234, seq=0, send_ts=ts)    # 65536 & 0xffff == 0
+        assert pingx._parse_reply(data, ident=1234, seq=65536) is not None
+
+
 # ── Stats accumulation / lost-counter stability ───────────────────────────────
 
 class TestStatsAccumulation:

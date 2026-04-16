@@ -221,6 +221,32 @@ def _build_echo(seq: int) -> bytes:
     return struct.pack('!BBHHH', 8, 0, chk, ident, seq & 0xffff) + payload
 
 
+def _parse_reply(data: bytes, ident: int, seq: int) -> Optional[float]:
+    """Validate an ICMP echo reply and return the embedded send timestamp.
+
+    Returns the monotonic send timestamp (a float) if the reply is a valid
+    echo reply (type=0) matching our ident and seq, or None if it should be
+    discarded.
+
+    ICMP layout for SOCK_DGRAM on macOS (no IP header):
+      [0]   type   — must be 0 (echo reply)
+      [1]   code   — 0
+      [2:4] checksum
+      [4:6] ident  — must match our PID-derived ident
+      [6:8] seq    — must match the sequence we sent
+      [8:16] payload timestamp (double, network byte order)
+    """
+    if len(data) < 16:
+        return None
+    if data[0] != 0:                                          # not echo reply
+        return None
+    pkt_ident = struct.unpack('!H', data[4:6])[0]
+    pkt_seq   = struct.unpack('!H', data[6:8])[0]
+    if pkt_ident != ident or pkt_seq != (seq & 0xffff):
+        return None
+    return struct.unpack('!d', data[8:16])[0]                # embedded send_ts
+
+
 # ── Window stats (call inside lock) ──────────────────────────────────────────
 
 def _window_loss(window_secs: float, st: PingState):
@@ -296,11 +322,30 @@ def _ping_loop(st: PingState) -> None:
             if st.ttl != 64:
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_TTL, st.ttl)
 
+            ident   = os.getpid() & 0xffff
             send_ts = time.monotonic()
             sock.sendto(_build_echo(seq), (st.target_ip, 0))
 
-            _data, _addr = sock.recvfrom(256)
-            rtt = (time.monotonic() - send_ts) * 1000
+            # Receive loop: discard packets that don't match our ident+seq.
+            # Without this, stale replies from previous timed-out pings arrive
+            # late and are accepted, producing impossibly low RTTs (~0.2ms).
+            deadline  = send_ts + st.timeout
+            embedded_ts = None
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise socket.timeout("reply timeout")
+                sock.settimeout(remaining)
+                data, _ = sock.recvfrom(256)
+                embedded_ts = _parse_reply(data, ident, seq)
+                if embedded_ts is not None:
+                    break
+                # Not our reply — keep waiting
+
+            # Use the timestamp we embedded in the payload: accurate even if
+            # this reply was delayed (e.g. a stale packet from a previous seq
+            # would carry its own old timestamp, yielding a correct long RTT).
+            rtt = (time.monotonic() - embedded_ts) * 1000
 
             with st.lock:
                 # Outcome known: success. Append and increment atomically so
