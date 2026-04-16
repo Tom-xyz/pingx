@@ -1,13 +1,14 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "pingx"
 version = "1.0.0"
 description = "Full-screen TUI ping monitor with auto-reconnect and WAN failover detection"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Thomas Boyle", email = "4200802+tom-xyz@users.noreply.github.com" }]
 keywords = ["ping", "network", "tui", "terminal", "monitor", "latency", "failover"]
 classifiers = [
@@ -15,7 +16,6 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: System Administrators",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
@@ -36,9 +36,8 @@ Homepage = "https://github.com/Tom-xyz/pingx"
 Repository = "https://github.com/Tom-xyz/pingx"
 Issues = "https://github.com/Tom-xyz/pingx/issues"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["pingx*"]
+[tool.setuptools]
+py-modules = ["pingx"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
