@@ -1,8 +1,8 @@
 # pingx
 
-A full-screen terminal ping monitor with auto-reconnect, WAN failover detection, and a retro TUI.
+A full-screen terminal ping monitor with live RTT history, rolling loss stats, and WAN failover detection.
 
-Standard `ping` stops the moment your network drops and forces you to rerun it. `pingx` keeps going — it detects the outage, retries in the background, and resumes automatically when connectivity returns. It also watches your default route for changes, which surfaces WAN failover events (e.g. fiber → Starlink) as they happen.
+Standard `ping` gives you a wall of scrolling numbers. `pingx` replaces that with a live four-panel dashboard: a braille sparkline that plots RTT over time, rolling packet loss windows, and automatic detection of gateway changes — useful when your network runs dual-WAN or has a failover setup.
 
 ![pingx demo](demo.gif)
 
