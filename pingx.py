@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 try:
     from rich.layout   import Layout
