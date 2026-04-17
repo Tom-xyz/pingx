@@ -17,25 +17,35 @@ Standard `ping` stops the moment your network drops and forces you to rerun it. 
 - **Colour themes** — 6 named palettes that restyle the entire interface
 - **No root required** — uses unprivileged ICMP (`SOCK_DGRAM`) on macOS; see Linux notes below
 
-## Requirements
+## Install
 
-- macOS or Linux (see [Platform support](#platform-support))
-- Python 3.10+
-- [rich](https://github.com/Textualize/rich)
-
-## Installation
-
+**Homebrew** (macOS — recommended):
 ```bash
-# From PyPI (once published)
-pip install pingx
+brew install tom-xyz/tap/pingx
+```
 
-# From source
+**pipx** (any platform — recommended for CLI tools):
+```bash
+pipx install pingx
+```
+
+**pip**:
+```bash
+pip install pingx
+```
+
+**From source**:
+```bash
 git clone https://github.com/Tom-xyz/pingx.git
 cd pingx
 pip install -e .
 ```
 
-Or copy `pingx.py` anywhere on your `$PATH` and `chmod +x` it.
+## Requirements
+
+- macOS or Linux (see [Platform support](#platform-support))
+- Python 3.10+
+- [rich](https://github.com/Textualize/rich) (installed automatically)
 
 ## Usage
 
