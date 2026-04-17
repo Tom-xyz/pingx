@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pingx"
-version = "1.0.1"
+version = "1.0.2"
 description = "Full-screen TUI ping monitor with auto-reconnect and WAN failover detection"
 readme = "README.md"
 license = "MIT"

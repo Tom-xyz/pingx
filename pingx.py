@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 try:
     from rich.layout   import Layout
@@ -186,6 +186,7 @@ class PingState:
     net_down:      bool                    = False
     down_start:    float                   = 0.0
     down_attempts: int                     = 0
+    consecutive_failures: int             = 0   # resets to 0 on any success
     route:         Optional[str]           = None
     failovers:     deque                   = field(default_factory=lambda: deque(maxlen=2))
     start_mono:    float                   = field(default_factory=time.monotonic)
@@ -228,23 +229,39 @@ def _parse_reply(data: bytes, ident: int, seq: int) -> Optional[float]:
     echo reply (type=0) matching our ident and seq, or None if it should be
     discarded.
 
-    ICMP layout for SOCK_DGRAM on macOS (no IP header):
-      [0]   type   — must be 0 (echo reply)
-      [1]   code   — 0
-      [2:4] checksum
-      [4:6] ident  — must match our PID-derived ident
-      [6:8] seq    — must match the sequence we sent
+    On macOS, recvfrom() with SOCK_DGRAM ICMP prepends the IP header to the
+    received data (first byte = 0x45 for a standard IPv4 header). On Linux,
+    the IP header is stripped and the data starts with the ICMP type byte.
+    We detect which case we have and skip the IP header when present.
+
+    ICMP layout (after any IP header):
+      [0]    type   — must be 0 (echo reply)
+      [1]    code   — 0
+      [2:4]  checksum
+      [4:6]  ident  — must match our PID-derived ident
+      [6:8]  seq    — must match the sequence we sent
       [8:16] payload timestamp (double, network byte order)
     """
-    if len(data) < 16:
+    if not data:
         return None
-    if data[0] != 0:                                          # not echo reply
+
+    # Detect IPv4 header: first nibble == 4, second nibble == header length
+    # (0x45 = version 4, 20-byte header — the normal case on macOS).
+    offset = 0
+    if (data[0] >> 4) == 4:
+        offset = (data[0] & 0x0F) * 4   # IHL field in 32-bit words
+
+    if len(data) < offset + 16:
         return None
-    pkt_ident = struct.unpack('!H', data[4:6])[0]
-    pkt_seq   = struct.unpack('!H', data[6:8])[0]
+
+    icmp = data[offset:]
+    if icmp[0] != 0:                                          # not echo reply
+        return None
+    pkt_ident = struct.unpack('!H', icmp[4:6])[0]
+    pkt_seq   = struct.unpack('!H', icmp[6:8])[0]
     if pkt_ident != ident or pkt_seq != (seq & 0xffff):
         return None
-    return struct.unpack('!d', data[8:16])[0]                # embedded send_ts
+    return struct.unpack('!d', icmp[8:16])[0]                # embedded send_ts
 
 
 # ── Window stats (call inside lock) ──────────────────────────────────────────
@@ -358,6 +375,8 @@ def _ping_loop(st: PingState) -> None:
                 st.ticker.append({'received': True, 'rtt': rtt})
 
             cfail = 0
+            with st.lock:
+                st.consecutive_failures = 0
 
             if st.net_down:
                 st.net_down  = False
@@ -377,6 +396,7 @@ def _ping_loop(st: PingState) -> None:
                 st.total_sent  += 1
                 st.ticker.append({'received': False, 'rtt': None})
                 st.current_rtt = None
+                st.consecutive_failures = cfail
 
             if cfail == DOWN_THRESHOLD and not st.net_down:
                 st.net_down      = True
@@ -465,6 +485,7 @@ def build_logo(st: PingState) -> Panel:
     with st.lock:
         down     = st.net_down
         attempts = st.down_attempts
+        cfail    = st.consecutive_failures
         route    = st.route
         target   = st.target
         tip      = st.target_ip
@@ -487,6 +508,10 @@ def build_logo(st: PingState) -> Panel:
         t.append("  ● ", style=Style(color=th.down_color, bold=True))
         t.append("NETWORK DOWN", style=Style(color=th.down_color, bold=True))
         t.append(f"  attempt {attempts}\n", style=Style(color=th.down_color, dim=True))
+    elif cfail > 0:
+        t.append("  ● ", style=Style(color="yellow", bold=True))
+        t.append("DEGRADED", style=Style(color="yellow", bold=True))
+        t.append(f"  ({cfail}/{DOWN_THRESHOLD} timeouts)\n", style=Style(color="yellow", dim=True))
     else:
         t.append("  ● ", style=Style(color=th.connected_color, bold=True))
         t.append("CONNECTED\n", style=Style(color=th.connected_color, bold=True))
@@ -694,7 +719,7 @@ def build_events(st: PingState) -> Panel:
                  style=Style(color=th.down_color, dim=True))
 
     t.append("\n")
-    t.append("  FAILOVER HISTORY\n", style=Style(dim=True, bold=True))
+    t.append("  EVENT HISTORY\n", style=Style(dim=True, bold=True))
     t.append("  " + "─" * 22 + "\n", style=Style(dim=True))
 
     if not failovers:

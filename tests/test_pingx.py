@@ -229,6 +229,46 @@ class TestParseReply:
         data = self._make_reply(ident=1234, seq=0, send_ts=ts)    # 65536 & 0xffff == 0
         assert pingx._parse_reply(data, ident=1234, seq=65536) is not None
 
+    def test_macos_ip_header_prepended(self):
+        """
+        Regression: on macOS, recvfrom() with SOCK_DGRAM ICMP prepends the
+        IP header (20 bytes, first byte = 0x45) before the ICMP message.
+        The original _parse_reply checked data[0] == 0 (ICMP echo reply type),
+        which always failed on macOS because data[0] was 0x45, causing every
+        ping to time out while the UI showed CONNECTED.
+
+        _parse_reply must detect the IPv4 header and skip it.
+        """
+        ts   = time.monotonic() - 0.012
+        icmp = self._make_reply(ident=1234, seq=7, send_ts=ts)
+
+        # Prepend a minimal 20-byte IPv4 header (version=4, IHL=5 → 0x45)
+        ip_hdr = bytes([
+            0x45, 0x00,           # version=4, IHL=5, DSCP/ECN
+            0x00, 0x24,           # total length (36 = 20 + 16)
+            0x00, 0x01,           # identification
+            0x00, 0x00,           # flags / fragment offset
+            0x40, 0x01,           # TTL=64, protocol=ICMP(1)
+            0x00, 0x00,           # header checksum (zeroed)
+            0x09, 0x09, 0x09, 0x09,  # source IP (9.9.9.9)
+            0x7f, 0x00, 0x00, 0x01,  # dest IP (127.0.0.1)
+        ])
+        macos_data = ip_hdr + icmp
+
+        result = pingx._parse_reply(macos_data, ident=1234, seq=7)
+        assert result is not None, \
+            "IP-header-prepended reply was rejected — macOS recvfrom regression"
+        assert abs(result - ts) < 1e-9
+
+    def test_macos_ip_header_wrong_seq_still_rejected(self):
+        """IP header present but wrong seq — must still return None."""
+        ts   = time.monotonic()
+        icmp = self._make_reply(ident=1234, seq=6, send_ts=ts)   # wrong seq
+        ip_hdr = bytes([0x45, 0x00, 0x00, 0x24, 0x00, 0x01, 0x00, 0x00,
+                         0x40, 0x01, 0x00, 0x00,
+                         0x09, 0x09, 0x09, 0x09, 0x7f, 0x00, 0x00, 0x01])
+        assert pingx._parse_reply(ip_hdr + icmp, ident=1234, seq=7) is None
+
 
 # ── Stats accumulation / lost-counter stability ───────────────────────────────
 
