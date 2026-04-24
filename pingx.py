@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-__version__ = "1.0.2"
+__version__ = "1.1.0"
 
 try:
     from rich.layout   import Layout
@@ -410,6 +410,23 @@ def _ping_loop(st: PingState) -> None:
 
             if st.net_down:
                 st.down_attempts += 1
+                # Re-resolve the hostname every 10 retries so that if the WAN
+                # changed upstream (same local gateway, different path), the next
+                # ping goes out via the current route rather than a stale one.
+                if st.down_attempts % 10 == 0:
+                    try:
+                        new_ip = socket.gethostbyname(st.target)
+                        with st.lock:
+                            if new_ip != st.target_ip:
+                                st.failovers.append({
+                                    'time': datetime.now().strftime('%H:%M:%S'),
+                                    'type': 'route',
+                                    'from': st.target_ip,
+                                    'to':   new_ip,
+                                })
+                                st.target_ip = new_ip
+                    except socket.gaierror:
+                        pass
 
         finally:
             sock.close()
