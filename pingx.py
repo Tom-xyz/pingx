@@ -309,7 +309,7 @@ def _route_monitor(st: PingState) -> None:
             if prev and new != prev:
                 with st.lock:
                     st.failovers.append({
-                        'time': datetime.now().strftime('%H:%M:%S'),
+                        'dt':   datetime.now(),
                         'type': 'route',
                         'from': prev,
                         'to':   new,
@@ -383,9 +383,9 @@ def _ping_loop(st: PingState) -> None:
                 down_secs    = time.monotonic() - st.down_start
                 with st.lock:
                     for evt in reversed(st.failovers):
-                        if evt['type'] == 'down' and 'recovered' not in evt:
-                            evt['recovered'] = datetime.now().strftime('%H:%M:%S')
-                            evt['down_secs'] = down_secs
+                        if evt['type'] == 'down' and 'recovered_dt' not in evt:
+                            evt['recovered_dt'] = datetime.now()
+                            evt['down_secs']    = down_secs
                             break
 
         except (socket.timeout, OSError):
@@ -404,7 +404,7 @@ def _ping_loop(st: PingState) -> None:
                 st.down_attempts = 0
                 with st.lock:
                     st.failovers.append({
-                        'time': datetime.now().strftime('%H:%M:%S'),
+                        'dt':   datetime.now(),
                         'type': 'down',
                     })
 
@@ -419,7 +419,7 @@ def _ping_loop(st: PingState) -> None:
                         with st.lock:
                             if new_ip != st.target_ip:
                                 st.failovers.append({
-                                    'time': datetime.now().strftime('%H:%M:%S'),
+                                    'dt':   datetime.now(),
                                     'type': 'route',
                                     'from': st.target_ip,
                                     'to':   new_ip,
@@ -466,6 +466,20 @@ def _rtt_markup(val: Optional[float], suffix: str = " ms") -> str:
     c = s.color.name if s.color else "white"
     bold = "bold " if s.bold else ""
     return f"[{bold}{c}]{val:.2f}{suffix}[/]"
+
+
+def _relative_time(dt: datetime) -> str:
+    """Human-readable delta from dt to now: 'just now', '5m ago', '3h ago', '2d ago'."""
+    secs = (datetime.now() - dt).total_seconds()
+    if secs < 0:    return "just now"
+    if secs < 5:    return "just now"
+    if secs < 60:   return f"{int(secs)}s ago"
+    mins = secs / 60
+    if mins < 60:   return f"{int(mins)}m ago"
+    hours = mins / 60
+    if hours < 24:  return f"{int(hours)}h ago"
+    days = hours / 24
+    return f"{int(days)}d ago"
 
 
 def _loss_markup(pct: float) -> str:
@@ -744,14 +758,23 @@ def build_events(st: PingState) -> Panel:
     else:
         for evt in reversed(failovers):
             etype = evt.get('type')
-            ts    = evt.get('time', '?')
-            t.append(f"  {ts}  ", style=Style(dim=True))
+            dt    = evt.get('dt')
+            if dt is None:
+                continue
+
+            ts_str = dt.strftime('%b %d  %H:%M:%S')
+            rel    = _relative_time(dt)
+
+            t.append(f"  {ts_str}  ", style=Style(dim=True))
+            t.append(f"· {rel}\n", style=Style(color=th.accent, dim=True))
 
             if etype == 'down':
-                t.append("▼ NETWORK DOWN", style=Style(color=th.down_color, bold=True))
-                if 'recovered' in evt:
-                    secs = evt.get('down_secs', 0)
-                    t.append(f"\n         ↑ recovered {evt['recovered']}",
+                t.append("  ▼ NETWORK DOWN", style=Style(color=th.down_color, bold=True))
+                if 'recovered_dt' in evt:
+                    rec_dt  = evt['recovered_dt']
+                    rec_ts  = rec_dt.strftime('%H:%M:%S')
+                    secs    = evt.get('down_secs', 0)
+                    t.append(f"\n    ↑ recovered {rec_ts}",
                              style=Style(color=th.connected_color, dim=True))
                     t.append(f"  ({secs:.1f}s)\n", style=Style(dim=True))
                 else:
@@ -760,9 +783,9 @@ def build_events(st: PingState) -> Panel:
             elif etype == 'route':
                 frm = evt.get('from', '?')
                 to  = evt.get('to',   '?')
-                t.append("⇄ WAN FAILOVER\n", style=Style(color="yellow", bold=True))
-                t.append(f"         {frm}\n", style=Style(dim=True))
-                t.append(f"         → {to}\n", style=Style(color=th.accent))
+                t.append("  ⇄ WAN FAILOVER\n", style=Style(color="yellow", bold=True))
+                t.append(f"    {frm}\n", style=Style(dim=True))
+                t.append(f"    → {to}\n", style=Style(color=th.accent))
 
             t.append("\n")
 
