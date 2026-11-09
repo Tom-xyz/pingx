@@ -20,7 +20,7 @@ from datetime import datetime
 from itertools import islice
 from typing import Optional
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 try:
     from rich.layout   import Layout
