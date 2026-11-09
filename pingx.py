@@ -17,6 +17,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
+from itertools import islice
 from typing import Optional
 
 __version__ = "1.2.0"
@@ -191,6 +192,9 @@ class PingState:
     failovers:     deque                   = field(default_factory=lambda: deque(maxlen=2))
     start_mono:    float                   = field(default_factory=time.monotonic)
     running:       bool                    = True
+    # Set whenever displayed state changes; the UI loop waits on it instead of
+    # redrawing on a fixed timer.
+    dirty:         threading.Event         = field(default_factory=threading.Event)
     target:        str                     = ""
     target_ip:     str                     = ""
     # CLI-configured params
@@ -300,6 +304,7 @@ def _route_monitor(st: PingState) -> None:
     prev = _get_route()
     with st.lock:
         st.route = prev
+    st.dirty.set()
     while st.running:
         time.sleep(3)
         new = _get_route()
@@ -314,6 +319,8 @@ def _route_monitor(st: PingState) -> None:
                         'from': prev,
                         'to':   new,
                     })
+            if new != prev:
+                st.dirty.set()
             prev = new
 
 
@@ -329,6 +336,7 @@ def _ping_loop(st: PingState) -> None:
     while st.running:
         if st.count > 0 and seq >= st.count:
             st.running = False
+            st.dirty.set()
             break
 
         t0   = time.monotonic()
@@ -430,6 +438,7 @@ def _ping_loop(st: PingState) -> None:
 
         finally:
             sock.close()
+            st.dirty.set()
 
         seq += 1
         time.sleep(max(0.0, st.interval - (time.monotonic() - t0)))
@@ -605,19 +614,20 @@ def build_stats(st: PingState) -> Panel:
 
 
 def build_visualizer(panel_w: int, panel_h: int, st: PingState) -> Panel:
-    with st.lock:
-        ticker = list(st.ticker)
-        down   = st.net_down
-
     # Each braille char = 2 data columns wide, 4 pixel rows tall
     chart_rows = max(3, panel_h - 6)
     chart_cols = max(4, panel_w - 12)
     n_steps    = chart_cols * 2
     total_h    = chart_rows * 4
 
+    # Copy only the newest n_steps entries (not the whole 5000-entry ticker).
+    with st.lock:
+        recent_entries = list(islice(reversed(st.ticker), n_steps))
+        down           = st.net_down
+    recent_entries.reverse()
+
     # Align ticker to data window. actual[i]=None means padding (no ping yet).
-    recent_entries = ticker[-n_steps:] if len(ticker) >= n_steps else ticker
-    actual = [None] * (n_steps - len(recent_entries)) + list(recent_entries)
+    actual = [None] * (n_steps - len(recent_entries)) + recent_entries
     data   = [e['rtt'] if e and e['received'] else None for e in actual]
 
     # Auto-scale Y-axis to observed range
@@ -648,6 +658,16 @@ def build_visualizer(panel_w: int, panel_h: int, st: PingState) -> Panel:
     th = _theme
     t  = Text()
 
+    pad_style   = Style(color=th.pad_color, dim=True)
+    style_cache = {}
+
+    def _style(color: str, bold: bool) -> Style:
+        key = (color, bold)
+        s = style_cache.get(key)
+        if s is None:
+            s = style_cache[key] = Style(color=color, bold=bold) if bold else Style(color=color)
+        return s
+
     for row_idx in range(chart_rows):
         row_px_top = row_idx * 4
 
@@ -666,7 +686,12 @@ def build_visualizer(panel_w: int, panel_h: int, st: PingState) -> Panel:
         else:
             t.append(" " * ylw + "  ", style=Style(dim=True))
 
-        # Braille columns
+        # Braille columns. Consecutive chars sharing a style are batched into a
+        # single append — one span per colour run instead of one per char, which
+        # makes both this build and Rich's render far cheaper.
+        run_chars: list = []
+        run_style: Optional[Style] = None
+
         for col_idx in range(chart_cols):
             li = col_idx * 2
             ri = col_idx * 2 + 1
@@ -680,7 +705,12 @@ def build_visualizer(panel_w: int, panel_h: int, st: PingState) -> Panel:
 
             # True padding — no pings received yet
             if not l_has_data and not r_has_data:
-                t.append("⣀", style=Style(color=th.pad_color, dim=True))
+                ch, style = "⣀", pad_style
+                if style is not run_style:
+                    if run_chars:
+                        t.append("".join(run_chars), style=run_style)
+                    run_chars, run_style = [], style
+                run_chars.append(ch)
                 continue
 
             l_timeout = l_has_data and not l_entry['received']
@@ -703,9 +733,15 @@ def build_visualizer(panel_w: int, panel_h: int, st: PingState) -> Panel:
 
             ch    = chr(0x2800 + char_val)
             color = _sparkline_color(data[ri] if not r_timeout else data[li])
-            style = Style(color=color, bold=True) if is_last else Style(color=color)
-            t.append(ch, style=style)
+            style = _style(color, is_last)
+            if style is not run_style:
+                if run_chars:
+                    t.append("".join(run_chars), style=run_style)
+                run_chars, run_style = [], style
+            run_chars.append(ch)
 
+        if run_chars:
+            t.append("".join(run_chars), style=run_style)
         t.append("\n")
 
     axis = " " * (ylw + 2) + "└" + "─" * max(1, chart_cols - 6) + " now →"
@@ -870,6 +906,7 @@ def main() -> None:
 
     def _on_exit(sig, frame):
         st.running = False
+        st.dirty.set()
 
     signal.signal(signal.SIGINT,  _on_exit)
     signal.signal(signal.SIGTERM, _on_exit)
@@ -879,11 +916,26 @@ def main() -> None:
 
     layout = _make_layout()
 
+    # Event-driven redraw: rebuild and render only when ping/route state changed,
+    # the uptime clock ticked over a second, or the terminal was resized. The
+    # old fixed 10 Hz rebuild plus Rich's independent 10 Hz auto-refresh cost
+    # ~25% of a core continuously.
+    last_sec  = -1
+    last_size = None
+
     with Live(layout, console=console, screen=True,
-              refresh_per_second=10) as _live:
+              auto_refresh=False) as live:
         while st.running:
-            w = console.width
-            h = console.height
+            changed = st.dirty.wait(timeout=0.25)
+            st.dirty.clear()
+            if not st.running:
+                break
+
+            w, h = console.width, console.height
+            sec  = int(time.monotonic() - st.start_mono)
+            if not changed and sec == last_sec and (w, h) == last_size:
+                continue
+            last_sec, last_size = sec, (w, h)
 
             viz_w = max(10, int(w * 3 / 5) - 4)
             viz_h = max(5,  int(h * 3 / 5) - 2)
@@ -892,8 +944,7 @@ def main() -> None:
             layout["stats"].update(build_stats(st))
             layout["viz"].update(build_visualizer(viz_w, viz_h, st))
             layout["events"].update(build_events(st))
-
-            time.sleep(0.1)
+            live.refresh()
 
     # Post-exit summary
     with st.lock:
